@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>ONNX Regression Demo</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial; max-width: 900px; margin: 36px auto; padding: 0 16px; color:#111; }
+    h1 { font-size: 1.6rem; margin-bottom: 8px; }
+    .grid { display: grid; grid-template-columns: 1fr 120px; gap:10px; align-items:center; margin-bottom:8px; }
+    label { font-size: 0.95rem; }
+    input[type="number"] { padding:8px; border-radius:6px; border:1px solid #ddd; width:100%; }
+    button { padding:10px 14px; border-radius:8px; border:none; background:#0066ff; color:white; cursor:pointer; }
+    pre { background:#f7f7f9; padding:10px; border-radius:8px; overflow:auto; }
+    .muted { color:#666; font-size:0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Regression demo (ONNX)</h1>
+  <div class="muted">Model: <span id="model-name">MODEL_NAME.onnx</span></div>
+  <p class="muted">Enter values for the features below (they will be standardized using the saved scaler).</p>
+
+  <div id="form-area">Loading model & features…</div>
+
+  <div style="margin-top:14px;">
+    <button id="predictBtn" disabled>Run prediction</button>
+    <span id="status" style="margin-left:12px;"></span>
+  </div>
+
+  <h3 style="margin-top:20px">Prediction</h3>
+  <pre id="output">—</pre>
+
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+  <script>
+  (async () => {
+    const modelFile = "MODEL_NAME.onnx"; // <-- replace with your onnx file name if needed
+    document.getElementById('model-name').innerText = modelFile;
+
+    // Load feature list and scaler JSON (assumed to be in same repo)
+    const [featResp, scalerResp] = await Promise.all([
+      fetch("feature_columns.json"),
+      fetch("scaler.json")
+    ]);
+    if (!featResp.ok || !scalerResp.ok) {
+      document.getElementById('form-area').innerText = "Missing feature_columns.json or scaler.json. Upload them to the repo.";
+      return;
+    }
+    const featureNames = await featResp.json();   // array of strings
+    const scaler = await scalerResp.json();       // {mean: [...], scale: [...]}
+
+    // build form
+    const formArea = document.getElementById('form-area');
+    formArea.innerHTML = "";
+    const inputs = [];
+    featureNames.forEach((f, i) => {
+      const row = document.createElement('div');
+      row.className = "grid";
+      const lbl = document.createElement('label');
+      lbl.innerText = f;
+      const inp = document.createElement('input');
+      inp.type = 'number';
+      inp.step = 'any';
+      inp.value = (scaler && scaler.mean) ? Number((scaler.mean[i]||0).toFixed(3)) : 0;
+      row.appendChild(lbl);
+      row.appendChild(inp);
+      formArea.appendChild(row);
+      inputs.push(inp);
+    });
+
+    // create ONNX Runtime session (uses WASM by default)
+    document.getElementById('status').innerText = "Loading ONNX model…";
+    let session;
+    try {
+      session = await ort.InferenceSession.create(modelFile);
+      document.getElementById('status').innerText = "Model loaded.";
+    } catch (e) {
+      document.getElementById('status').innerText = "Failed to load ONNX model. Check model path and CORS.";
+      document.getElementById('output').innerText = String(e);
+      return;
+    }
+
+    // predict button handler
+    const predictBtn = document.getElementById('predictBtn');
+    predictBtn.disabled = false;
+    predictBtn.addEventListener('click', async () => {
+      document.getElementById('output').innerText = "Running...";
+      // gather inputs, apply scaler: (x - mean)/scale
+      const arr = new Float32Array(featureNames.length);
+      for (let i=0;i<featureNames.length;i++){
+        const raw = parseFloat(inputs[i].value || 0.0);
+        const m = (scaler.mean && scaler.mean[i]) ? scaler.mean[i] : 0.0;
+        const s = (scaler.scale && scaler.scale[i]) ? scaler.scale[i] : 1.0;
+        arr[i] = (raw - m) / (s === 0 ? 1.0 : s);
+      }
+
+      // build tensor and run
+      const tensor = new ort.Tensor('float32', arr, [1, arr.length]);
+      try {
+        const feeds = {};
+        // assume first input name is 'input' — if different, check session.getInputs()
+        const inputName = session.inputNames ? session.inputNames[0] : session._session.inputNames && session._session.inputNames[0] || session.inputNames;
+        // simpler: use the first input name reported from the session.meta
+        const firstInput = session.inputNames ? session.inputNames[0] : session._modelInputs && session._modelInputs[0] || Object.keys(session._model)[0];
+        // session.run accepts map of name->tensor; we can use session.getInputs() instead
+        const inName = session.inputNames ? session.inputNames[0] : session.getInputs()[0].name;
+        feeds[inName] = tensor;
+
+        const results = await session.run(feeds);
+        // get first output
+        const outName = session.outputNames ? session.outputNames[0] : session.getOutputs()[0].name;
+        let outTensor = results[outName] || results[Object.keys(results)[0]];
+        document.getElementById('output').innerText = JSON.stringify({prediction: outTensor.data}, null, 2);
+      } catch (err) {
+        document.getElementById('output').innerText = "Inference error: " + String(err);
+      }
+    });
+
+  })();
+  </script>
+</body>
+</html>
